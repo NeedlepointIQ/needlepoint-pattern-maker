@@ -24,6 +24,10 @@
   canvas { width: 100%; height: auto; image-rendering: pixelated; border-radius: 8px; }
   label { font-size: 12px; color: #333; }
   .grid-toggle { display: inline-flex; align-items: center; gap: 6px; }
+  @media (max-width: 920px) {
+    .row { grid-template-columns: 1fr; }
+    .controls { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  }
 </style>
 </head>
 <body>
@@ -32,27 +36,27 @@
 
     <div class="controls panel">
       <!-- Canvas Size Helper -->
-<div style="grid-column: 1 / -1; border: 1px solid #eee; border-radius: 8px; padding: 12px;">
-  <h3 style="margin-top:0; font-size:14px;">Canvas Size Helper</h3>
-  <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px;">
-    <div>
-      <label>Canvas Width (inches)</label>
-      <input id="canvasWidthIn" type="number" min="1" step="0.1" placeholder="e.g. 12" />
-    </div>
-    <div>
-      <label>Canvas Height (inches)</label>
-      <input id="canvasHeightIn" type="number" min="1" step="0.1" placeholder="e.g. 14" />
-    </div>
-    <div>
-      <label>Mesh Count (holes/inch)</label>
-      <input id="meshCount" type="number" min="5" max="24" value="14" />
-    </div>
-    <div style="display:flex; align-items:flex-end;">
-      <button id="calcStitchesBtn">Convert to Stitches</button>
-    </div>
-  </div>
-  <div class="hint">This helps you figure out how many stitches your canvas equals. It will auto-fill the boxes below.</div>
-</div>
+      <div style="grid-column: 1 / -1; border: 1px solid #eee; border-radius: 8px; padding: 12px;">
+        <h3 style="margin-top:0; font-size:14px;">Canvas Size Helper</h3>
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px;">
+          <div>
+            <label>Canvas Width (inches)</label>
+            <input id="canvasWidthIn" type="number" min="1" step="0.1" placeholder="e.g. 12" />
+          </div>
+          <div>
+            <label>Canvas Height (inches)</label>
+            <input id="canvasHeightIn" type="number" min="1" step="0.1" placeholder="e.g. 14" />
+          </div>
+          <div>
+            <label>Mesh Count (holes/inch)</label>
+            <input id="meshCount" type="number" min="5" max="24" value="14" />
+          </div>
+          <div style="display:flex; align-items:flex-end;">
+            <button id="calcStitchesBtn">Convert to Stitches</button>
+          </div>
+        </div>
+        <div class="hint">Enter inches and mesh count; this fills the stitch width/height below.</div>
+      </div>
 
       <div>
         <label>Upload Image</label>
@@ -94,29 +98,29 @@
       <div class="panel">
         <h3 style="margin-top:0;">Preview</h3>
         <canvas id="patternCanvas"></canvas>
-        <div class="hint">Zoom with your browser for detail. Grid lines show stitches.</div>
+        <div class="hint">Zoom in your browser to inspect detail. Grid lines = stitches.</div>
       </div>
 
       <div class="panel">
         <h3 style="margin-top:0;">Color Legend</h3>
         <div id="legend" class="legend"></div>
-        <div class="footer">Colors are approximated automatically. For exact floss matches, map these hex colors to your brand chart.</div>
+        <div class="footer">Colors are approximations. Map hex values to your preferred floss chart if needed.</div>
       </div>
     </div>
   </div>
 
 <script>
 /*
-  Simple client-side needlepoint generator.
+  Client-side needlepoint generator.
   Steps:
    1) Load image
    2) Resize to target stitches (width x height)
-   3) Quantize colors to N buckets (simple k-means-ish)
-   4) Paint enlarged grid with lines, optional letter symbols per color
-   5) Allow download as PNG
+   3) Quantize colors to N buckets (simple k-means)
+   4) Paint enlarged grid with lines (+ optional symbols)
+   5) Download as PNG
 */
 
-// --- Helpers ---
+// --- Element refs ---
 const fileInput = document.getElementById('fileInput');
 const stitchWInput = document.getElementById('stitchW');
 const stitchHInput = document.getElementById('stitchH');
@@ -127,21 +131,32 @@ const downloadBtn = document.getElementById('downloadBtn');
 const patternCanvas = document.getElementById('patternCanvas');
 const legendEl = document.getElementById('legend');
 
-let loadedImageBitmap = null;
+// Canvas helper controls
+const calcBtn = document.getElementById('calcStitchesBtn');
+const canvasWidthIn = document.getElementById('canvasWidthIn');
+const canvasHeightIn = document.getElementById('canvasHeightIn');
+const meshCount = document.getElementById('meshCount');
+
 let lastGrid = null;   // {w, h, colors: Array<{r,g,b,hex,symbol}>, data: [indexes], cellSize}
-let symbolSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*abcdefghijklmnopqrstuvwxyz".split("");
+const symbolSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*abcdefghijklmnopqrstuvwxyz".split("");
 
 // Enable generate after file picked
 fileInput.addEventListener('change', () => {
   generateBtn.disabled = !fileInput.files || fileInput.files.length === 0;
 });
 
-// Load image as ImageBitmap for speed
+// Load image as ImageBitmap (simplified & reliable)
 async function loadImageBitmap(file) {
-  const blobURL = URL.createObjectURL(file);
-  const img = await fetch(blobURL).then(r => r.blob()).then(createImageBitmap);
-  URL.revokeObjectURL(blobURL);
-  return img;
+  if ('createImageBitmap' in window) {
+    return await createImageBitmap(file);
+  }
+  // Fallback for older browsers
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
 }
 
 // Resize image to stitches using nearest neighbor
@@ -150,17 +165,14 @@ function resizeToGrid(imgBitmap, gw, gh) {
   c.width = gw;
   c.height = gh;
   const ctx = c.getContext('2d', { willReadFrequently: true });
-  // nearest-neighbor
   ctx.imageSmoothingEnabled = false;
+  // drawImage handles both ImageBitmap and HTMLImageElement
   ctx.drawImage(imgBitmap, 0, 0, gw, gh);
-  const imgData = ctx.getImageData(0, 0, gw, gh);
-  return imgData;
+  return ctx.getImageData(0, 0, gw, gh);
 }
 
-// K-means color quantization (very small & simple)
+// K-means color quantization
 function quantizeKMeans(pixels, k, maxIter = 10) {
-  // pixels: Uint8ClampedArray [r,g,b,a,...]
-  // Build initial centroids by sampling evenly
   const N = pixels.length / 4;
   const sampleStep = Math.max(1, Math.floor(N / k));
   let centroids = [];
@@ -199,7 +211,6 @@ function quantizeKMeans(pixels, k, maxIter = 10) {
         centroids[c][1] = Math.round(sum[c][1] / sum[c][3]);
         centroids[c][2] = Math.round(sum[c][2] / sum[c][3]);
       } else {
-        // re-seed if empty
         const ri = (Math.floor(Math.random() * N)) * 4;
         centroids[c] = [pixels[ri], pixels[ri+1], pixels[ri+2]];
       }
@@ -213,25 +224,20 @@ function toHex(r,g,b) {
   return "#" + h(r) + h(g) + h(b);
 }
 
-// Build a map from centroid index to symbol & hex
 function buildPalette(centroids) {
-  return centroids.map((c,i) => {
-    return {
-      r: c[0], g: c[1], b: c[2],
-      hex: toHex(c[0], c[1], c[2]),
-      symbol: symbolSet[i % symbolSet.length]
-    };
-  });
+  return centroids.map((c,i) => ({
+    r: c[0], g: c[1], b: c[2],
+    hex: toHex(c[0], c[1], c[2]),
+    symbol: symbolSet[i % symbolSet.length]
+  }));
 }
 
-// Paint final pattern to visible canvas
 function paintPattern(grid, showSymbols) {
   const { w, h, colors, data } = grid;
 
-  // Compute a nice on-screen cell size
-  const maxCanvasWidth = 900; // px
+  const maxCanvasWidth = 900;
   const cellSize = Math.max(4, Math.floor(maxCanvasWidth / w));
-  patternCanvas.width = w * cellSize + 1;  // +1 for right/bottom grid line
+  patternCanvas.width = w * cellSize + 1;
   patternCanvas.height = h * cellSize + 1;
 
   const ctx = patternCanvas.getContext('2d');
@@ -256,7 +262,6 @@ function paintPattern(grid, showSymbols) {
       for (let x = 0; x < w; x++) {
         const idx = y * w + x;
         const c = colors[data[idx]];
-        // choose white/black for contrast
         const lumin = (0.2126*c.r + 0.7152*c.g + 0.0722*c.b);
         ctx.fillStyle = lumin < 128 ? "white" : "black";
         ctx.fillText(c.symbol, x*cellSize + cellSize/2, y*cellSize + cellSize/2);
@@ -299,10 +304,9 @@ function paintPattern(grid, showSymbols) {
   grid.cellSize = cellSize;
 }
 
-// Draw color legend
 function renderLegend(colors) {
   legendEl.innerHTML = "";
-  colors.forEach((c, i) => {
+  colors.forEach((c) => {
     const row = document.createElement('div');
     row.className = 'swatch';
     const box = document.createElement('div');
@@ -316,8 +320,8 @@ function renderLegend(colors) {
   });
 }
 
-// Generate workflow
-generateBtn.addEventListener('click', async () => {
+// Generate
+document.getElementById('generateBtn').addEventListener('click', async () => {
   const file = fileInput.files && fileInput.files[0];
   if (!file) return;
 
@@ -327,30 +331,21 @@ generateBtn.addEventListener('click', async () => {
 
   try {
     const img = await loadImageBitmap(file);
-    loadedImageBitmap = img;
 
     const gw = Math.max(5, Math.min(400, parseInt(stitchWInput.value || "80", 10)));
     const gh = Math.max(5, Math.min(400, parseInt(stitchHInput.value || "80", 10)));
     const k  = Math.max(2, Math.min(64, parseInt(colorCountInput.value || "12", 10)));
 
-    // Step 1–2: resize to grid
     const small = resizeToGrid(img, gw, gh);
-
-    // Step 3: quantize to k colors
     const { centroids, assignments } = quantizeKMeans(small.data, k, 8);
     const palette = buildPalette(centroids);
 
-    // Build data indexes aligned to palette ordering
     const w = small.width, h = small.height;
     const idxes = new Uint16Array(w*h);
     for (let i = 0; i < assignments.length; i++) idxes[i] = assignments[i];
 
     lastGrid = { w, h, colors: palette, data: idxes };
-
-    // Step 4: paint preview
     paintPattern(lastGrid, showSymbolsInput.checked);
-
-    // Step 5: legend
     renderLegend(palette);
 
     downloadBtn.disabled = false;
@@ -364,9 +359,7 @@ generateBtn.addEventListener('click', async () => {
 
 // Repaint if symbols toggled
 showSymbolsInput.addEventListener('change', () => {
-  if (lastGrid) {
-    paintPattern(lastGrid, showSymbolsInput.checked);
-  }
+  if (lastGrid) paintPattern(lastGrid, showSymbolsInput.checked);
 });
 
 // Download PNG
@@ -377,11 +370,12 @@ downloadBtn.addEventListener('click', () => {
   link.href = patternCanvas.toDataURL('image/png');
   link.click();
 });
-  // --- Canvas Size Helper ---
-document.getElementById('calcStitchesBtn').addEventListener('click', () => {
-  const widthIn = parseFloat(document.getElementById('canvasWidthIn').value);
-  const heightIn = parseFloat(document.getElementById('canvasHeightIn').value);
-  const mesh = parseFloat(document.getElementById('meshCount').value);
+
+// Canvas Size Helper
+calcBtn.addEventListener('click', () => {
+  const widthIn = parseFloat(canvasWidthIn.value);
+  const heightIn = parseFloat(canvasHeightIn.value);
+  const mesh = parseFloat(meshCount.value);
 
   if (isNaN(widthIn) || isNaN(heightIn) || isNaN(mesh) || widthIn <= 0 || heightIn <= 0) {
     alert('Please enter valid canvas dimensions.');
@@ -391,8 +385,8 @@ document.getElementById('calcStitchesBtn').addEventListener('click', () => {
   const stitchW = Math.round(widthIn * mesh);
   const stitchH = Math.round(heightIn * mesh);
 
-  document.getElementById('stitchW').value = stitchW;
-  document.getElementById('stitchH').value = stitchH;
+  stitchWInput.value = stitchW;
+  stitchHInput.value = stitchH;
 
   alert(`Your canvas equals approximately ${stitchW} × ${stitchH} stitches.`);
 });
