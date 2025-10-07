@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Needlepoint Pattern Maker (Free)</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; line-height: 1.4; }
+  h1 { margin: 0 0 12px; font-size: 20px; }
+  .app { display: grid; gap: 16px; max-width: 1100px; }
+  .controls { display: grid; gap: 12px; grid-template-columns: repeat(6, minmax(120px, 1fr)); align-items: end; }
+  .controls > div { display: grid; gap: 6px; }
+  input[type="number"] { padding: 6px 8px; }
+  input[type="file"] { padding: 6px 0; }
+  button { padding: 10px 14px; border: 1px solid #ddd; background: white; border-radius: 8px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .row { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; align-items: start; }
+  .panel { border: 1px solid #eee; border-radius: 12px; padding: 12px; }
+  .legend { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .swatch { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .box { width: 18px; height: 18px; border: 1px solid #ccc; border-radius: 4px; }
+  .hint { color: #666; font-size: 12px; }
+  .footer { color: #666; font-size: 12px; margin-top: 10px; }
+  canvas { width: 100%; height: auto; image-rendering: pixelated; border-radius: 8px; }
+  label { font-size: 12px; color: #333; }
+  .grid-toggle { display: inline-flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+  <div class="app">
+    <h1>Needlepoint Pattern Maker</h1>
+
+    <div class="controls panel">
+      <div>
+        <label>Upload Image</label>
+        <input id="fileInput" type="file" accept="image/*" />
+        <div class="hint">Use a clear, well-lit image.</div>
+      </div>
+
+      <div>
+        <label>Width (stitches)</label>
+        <input id="stitchW" type="number" min="5" max="400" value="80" />
+      </div>
+
+      <div>
+        <label>Height (stitches)</label>
+        <input id="stitchH" type="number" min="5" max="400" value="80" />
+      </div>
+
+      <div>
+        <label>Max Colors</label>
+        <input id="colorCount" type="number" min="2" max="64" value="12" />
+        <div class="hint">Fewer colors = simpler stitching.</div>
+      </div>
+
+      <div>
+        <label>Show Symbols</label>
+        <div class="grid-toggle">
+          <input id="showSymbols" type="checkbox" />
+          <span class="hint">Overlay letter symbols</span>
+        </div>
+      </div>
+
+      <div>
+        <button id="generateBtn" disabled>Generate Pattern</button>
+        <button id="downloadBtn" disabled>Download PNG</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="panel">
+        <h3 style="margin-top:0;">Preview</h3>
+        <canvas id="patternCanvas"></canvas>
+        <div class="hint">Zoom with your browser for detail. Grid lines show stitches.</div>
+      </div>
+
+      <div class="panel">
+        <h3 style="margin-top:0;">Color Legend</h3>
+        <div id="legend" class="legend"></div>
+        <div class="footer">Colors are approximated automatically. For exact floss matches, map these hex colors to your brand chart.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+  Simple client-side needlepoint generator.
+  Steps:
+   1) Load image
+   2) Resize to target stitches (width x height)
+   3) Quantize colors to N buckets (simple k-means-ish)
+   4) Paint enlarged grid with lines, optional letter symbols per color
+   5) Allow download as PNG
+*/
+
+// --- Helpers ---
+const fileInput = document.getElementById('fileInput');
+const stitchWInput = document.getElementById('stitchW');
+const stitchHInput = document.getElementById('stitchH');
+const colorCountInput = document.getElementById('colorCount');
+const showSymbolsInput = document.getElementById('showSymbols');
+const generateBtn = document.getElementById('generateBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const patternCanvas = document.getElementById('patternCanvas');
+const legendEl = document.getElementById('legend');
+
+let loadedImageBitmap = null;
+let lastGrid = null;   // {w, h, colors: Array<{r,g,b,hex,symbol}>, data: [indexes], cellSize}
+let symbolSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*abcdefghijklmnopqrstuvwxyz".split("");
+
+// Enable generate after file picked
+fileInput.addEventListener('change', () => {
+  generateBtn.disabled = !fileInput.files || fileInput.files.length === 0;
+});
+
+// Load image as ImageBitmap for speed
+async function loadImageBitmap(file) {
+  const blobURL = URL.createObjectURL(file);
+  const img = await fetch(blobURL).then(r => r.blob()).then(createImageBitmap);
+  URL.revokeObjectURL(blobURL);
+  return img;
+}
+
+// Resize image to stitches using nearest neighbor
+function resizeToGrid(imgBitmap, gw, gh) {
+  const c = document.createElement('canvas');
+  c.width = gw;
+  c.height = gh;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  // nearest-neighbor
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(imgBitmap, 0, 0, gw, gh);
+  const imgData = ctx.getImageData(0, 0, gw, gh);
+  return imgData;
+}
+
+// K-means color quantization (very small & simple)
+function quantizeKMeans(pixels, k, maxIter = 10) {
+  // pixels: Uint8ClampedArray [r,g,b,a,...]
+  // Build initial centroids by sampling evenly
+  const N = pixels.length / 4;
+  const sampleStep = Math.max(1, Math.floor(N / k));
+  let centroids = [];
+  for (let i = 0; i < k; i++) {
+    const idx = (i * sampleStep * 4) % pixels.length;
+    centroids.push([pixels[idx], pixels[idx+1], pixels[idx+2]]);
+  }
+
+  let assignments = new Uint16Array(N);
+  for (let iter = 0; iter < maxIter; iter++) {
+    // Assign
+    for (let i = 0; i < N; i++) {
+      const r = pixels[i*4], g = pixels[i*4+1], b = pixels[i*4+2];
+      let best = 0, bestD = 1e12;
+      for (let c = 0; c < k; c++) {
+        const dr = r - centroids[c][0];
+        const dg = g - centroids[c][1];
+        const db = b - centroids[c][2];
+        const d = dr*dr + dg*dg + db*db;
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      assignments[i] = best;
+    }
+    // Update
+    const sum = Array.from({length: k}, () => [0,0,0,0]);
+    for (let i = 0; i < N; i++) {
+      const c = assignments[i];
+      sum[c][0] += pixels[i*4];
+      sum[c][1] += pixels[i*4+1];
+      sum[c][2] += pixels[i*4+2];
+      sum[c][3] += 1;
+    }
+    for (let c = 0; c < k; c++) {
+      if (sum[c][3] > 0) {
+        centroids[c][0] = Math.round(sum[c][0] / sum[c][3]);
+        centroids[c][1] = Math.round(sum[c][1] / sum[c][3]);
+        centroids[c][2] = Math.round(sum[c][2] / sum[c][3]);
+      } else {
+        // re-seed if empty
+        const ri = (Math.floor(Math.random() * N)) * 4;
+        centroids[c] = [pixels[ri], pixels[ri+1], pixels[ri+2]];
+      }
+    }
+  }
+  return { centroids, assignments };
+}
+
+function toHex(r,g,b) {
+  const h = (n)=> n.toString(16).padStart(2,'0');
+  return "#" + h(r) + h(g) + h(b);
+}
+
+// Build a map from centroid index to symbol & hex
+function buildPalette(centroids) {
+  return centroids.map((c,i) => {
+    return {
+      r: c[0], g: c[1], b: c[2],
+      hex: toHex(c[0], c[1], c[2]),
+      symbol: symbolSet[i % symbolSet.length]
+    };
+  });
+}
+
+// Paint final pattern to visible canvas
+function paintPattern(grid, showSymbols) {
+  const { w, h, colors, data } = grid;
+
+  // Compute a nice on-screen cell size
+  const maxCanvasWidth = 900; // px
+  const cellSize = Math.max(4, Math.floor(maxCanvasWidth / w));
+  patternCanvas.width = w * cellSize + 1;  // +1 for right/bottom grid line
+  patternCanvas.height = h * cellSize + 1;
+
+  const ctx = patternCanvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  // Fill cells
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      const c = colors[data[idx]];
+      ctx.fillStyle = c.hex;
+      ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+    }
+  }
+
+  // Optional symbols
+  if (showSymbols) {
+    ctx.font = `${Math.max(8, Math.floor(cellSize*0.6))}px monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        const c = colors[data[idx]];
+        // choose white/black for contrast
+        const lumin = (0.2126*c.r + 0.7152*c.g + 0.0722*c.b);
+        ctx.fillStyle = lumin < 128 ? "white" : "black";
+        ctx.fillText(c.symbol, x*cellSize + cellSize/2, y*cellSize + cellSize/2);
+      }
+    }
+  }
+
+  // Grid lines
+  ctx.strokeStyle = "rgba(0,0,0,0.4)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= w; x++) {
+    ctx.beginPath();
+    ctx.moveTo(x*cellSize + 0.5, 0);
+    ctx.lineTo(x*cellSize + 0.5, h*cellSize);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= h; y++) {
+    ctx.beginPath();
+    ctx.moveTo(0, y*cellSize + 0.5);
+    ctx.lineTo(w*cellSize, y*cellSize + 0.5);
+    ctx.stroke();
+  }
+
+  // Heavier 10x lines
+  ctx.strokeStyle = "rgba(0,0,0,0.7)";
+  ctx.lineWidth = 1.5;
+  for (let x = 0; x <= w; x += 10) {
+    ctx.beginPath();
+    ctx.moveTo(x*cellSize + 0.5, 0);
+    ctx.lineTo(x*cellSize + 0.5, h*cellSize);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= h; y += 10) {
+    ctx.beginPath();
+    ctx.moveTo(0, y*cellSize + 0.5);
+    ctx.lineTo(w*cellSize, y*cellSize + 0.5);
+    ctx.stroke();
+  }
+
+  grid.cellSize = cellSize;
+}
+
+// Draw color legend
+function renderLegend(colors) {
+  legendEl.innerHTML = "";
+  colors.forEach((c, i) => {
+    const row = document.createElement('div');
+    row.className = 'swatch';
+    const box = document.createElement('div');
+    box.className = 'box';
+    box.style.background = c.hex;
+    const label = document.createElement('div');
+    label.textContent = `${c.symbol}  ${c.hex}`;
+    row.appendChild(box);
+    row.appendChild(label);
+    legendEl.appendChild(row);
+  });
+}
+
+// Generate workflow
+generateBtn.addEventListener('click', async () => {
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) return;
+
+  generateBtn.disabled = true;
+  downloadBtn.disabled = true;
+  legendEl.innerHTML = "Processing…";
+
+  try {
+    const img = await loadImageBitmap(file);
+    loadedImageBitmap = img;
+
+    const gw = Math.max(5, Math.min(400, parseInt(stitchWInput.value || "80", 10)));
+    const gh = Math.max(5, Math.min(400, parseInt(stitchHInput.value || "80", 10)));
+    const k  = Math.max(2, Math.min(64, parseInt(colorCountInput.value || "12", 10)));
+
+    // Step 1–2: resize to grid
+    const small = resizeToGrid(img, gw, gh);
+
+    // Step 3: quantize to k colors
+    const { centroids, assignments } = quantizeKMeans(small.data, k, 8);
+    const palette = buildPalette(centroids);
+
+    // Build data indexes aligned to palette ordering
+    const w = small.width, h = small.height;
+    const idxes = new Uint16Array(w*h);
+    for (let i = 0; i < assignments.length; i++) idxes[i] = assignments[i];
+
+    lastGrid = { w, h, colors: palette, data: idxes };
+
+    // Step 4: paint preview
+    paintPattern(lastGrid, showSymbolsInput.checked);
+
+    // Step 5: legend
+    renderLegend(palette);
+
+    downloadBtn.disabled = false;
+  } catch (e) {
+    console.error(e);
+    legendEl.innerHTML = "<span style='color:#b00'>Something went wrong. Try a smaller size or fewer colors.</span>";
+  } finally {
+    generateBtn.disabled = false;
+  }
+});
+
+// Repaint if symbols toggled
+showSymbolsInput.addEventListener('change', () => {
+  if (lastGrid) {
+    paintPattern(lastGrid, showSymbolsInput.checked);
+  }
+});
+
+// Download PNG
+downloadBtn.addEventListener('click', () => {
+  if (!lastGrid) return;
+  const link = document.createElement('a');
+  link.download = 'needlepoint-pattern.png';
+  link.href = patternCanvas.toDataURL('image/png');
+  link.click();
+});
+</script>
+</body>
+</html>
