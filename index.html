@@ -31,6 +31,29 @@
     <h1>Needlepoint Pattern Maker</h1>
 
     <div class="controls panel">
+      <!-- Canvas Size Helper -->
+<div style="grid-column: 1 / -1; border: 1px solid #eee; border-radius: 8px; padding: 12px;">
+  <h3 style="margin-top:0; font-size:14px;">Canvas Size Helper</h3>
+  <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px;">
+    <div>
+      <label>Canvas Width (inches)</label>
+      <input id="canvasWidthIn" type="number" min="1" step="0.1" placeholder="e.g. 12" />
+    </div>
+    <div>
+      <label>Canvas Height (inches)</label>
+      <input id="canvasHeightIn" type="number" min="1" step="0.1" placeholder="e.g. 14" />
+    </div>
+    <div>
+      <label>Mesh Count (holes/inch)</label>
+      <input id="meshCount" type="number" min="5" max="24" value="14" />
+    </div>
+    <div style="display:flex; align-items:flex-end;">
+      <button id="calcStitchesBtn">Convert to Stitches</button>
+    </div>
+  </div>
+  <div class="hint">This helps you figure out how many stitches your canvas equals. It will auto-fill the boxes below.</div>
+</div>
+
       <div>
         <label>Upload Image</label>
         <input id="fileInput" type="file" accept="image/*" />
@@ -353,6 +376,25 @@ downloadBtn.addEventListener('click', () => {
   link.download = 'needlepoint-pattern.png';
   link.href = patternCanvas.toDataURL('image/png');
   link.click();
+});
+  // --- Canvas Size Helper ---
+document.getElementById('calcStitchesBtn').addEventListener('click', () => {
+  const widthIn = parseFloat(document.getElementById('canvasWidthIn').value);
+  const heightIn = parseFloat(document.getElementById('canvasHeightIn').value);
+  const mesh = parseFloat(document.getElementById('meshCount').value);
+
+  if (isNaN(widthIn) || isNaN(heightIn) || isNaN(mesh) || widthIn <= 0 || heightIn <= 0) {
+    alert('Please enter valid canvas dimensions.');
+    return;
+  }
+
+  const stitchW = Math.round(widthIn * mesh);
+  const stitchH = Math.round(heightIn * mesh);
+
+  document.getElementById('stitchW').value = stitchW;
+  document.getElementById('stitchH').value = stitchH;
+
+  alert(`Your canvas equals approximately ${stitchW} × ${stitchH} stitches.`);
 });
 </script>
 </body>
